@@ -1,0 +1,110 @@
+#include <furi.h>
+#include <gui/gui.h>
+#include <gui/view_port.h>
+#include <storage/storage.h>
+#include <bluetooth/bluetooth.h>
+#include <string.h>
+
+#define MAX_DEVICES 50
+#define STORAGE_FILE "/ext/ble_devices.txt"
+
+typedef struct {
+    char name[32];
+    uint8_t addr[6];
+    int8_t rssi;
+} BleDevice;
+
+static BleDevice devices[MAX_DEVICES];
+static uint8_t device_count = 0;
+static uint8_t scroll_index = 0;
+
+// Save discovered devices to SD card
+static void save_devices_to_file() {
+    FILE* f = fopen(STORAGE_FILE, "w");
+    if(!f) return;
+    for(uint8_t i = 0; i < device_count; i++) {
+        fprintf(f, "%02X:%02X:%02X:%02X:%02X:%02X,%d,%s\n",
+            devices[i].addr[0], devices[i].addr[1], devices[i].addr[2],
+            devices[i].addr[3], devices[i].addr[4], devices[i].addr[5],
+            devices[i].rssi,
+            devices[i].name);
+    }
+    fclose(f);
+}
+
+// Called when a BLE device is found
+static void ble_device_found(
+    const uint8_t* addr,
+    const char* name,
+    int8_t rssi) {
+
+    // Prevent duplicates
+    for(uint8_t i = 0; i < device_count; i++) {
+        if(memcmp(devices[i].addr, addr, 6) == 0) return;
+    }
+
+    if(device_count >= MAX_DEVICES) return;
+
+    memcpy(devices[device_count].addr, addr, 6);
+    strncpy(devices[device_count].name, name ? name : "Unknown", 31);
+    devices[device_count].rssi = rssi;
+    device_count++;
+
+    save_devices_to_file();
+}
+
+// Draw GUI
+static void draw_callback(Canvas* canvas, void* context) {
+    UNUSED(context);
+    canvas_clear(canvas);
+
+    canvas_draw_str(canvas, 2, 10, "BLE Scanner");
+
+    uint8_t max_display = 6; // Max visible items
+    for(uint8_t i = 0; i < max_display && (scroll_index + i) < device_count; i++) {
+        char line[64];
+        snprintf(line, sizeof(line), "%s (%d dBm)",
+                 devices[scroll_index + i].name,
+                 devices[scroll_index + i].rssi);
+        canvas_draw_str(canvas, 2, 22 + (i * 10), line);
+    }
+
+    if(device_count > max_display) {
+        canvas_draw_str(canvas, 2, 90, "Use UP/DOWN to scroll");
+    }
+}
+
+// Handle button presses
+static void handle_input(InputEvent* event) {
+    if(event->type != InputTypePress) return;
+    if(event->key == InputKeyUp && scroll_index > 0) scroll_index--;
+    if(event->key == InputKeyDown && scroll_index + 6 < device_count) scroll_index++;
+}
+
+// Main app
+int32_t ble_scanner_app(void* p) {
+    UNUSED(p);
+
+    device_count = 0;
+    scroll_index = 0;
+
+    // Start BLE scan
+    bluetooth_scan_start(ble_device_found);
+
+    ViewPort* vp = view_port_alloc();
+    view_port_draw_callback_set(vp, draw_callback, NULL);
+    view_port_input_callback_set(vp, handle_input, NULL);
+
+    Gui* gui = furi_record_open(RECORD_GUI);
+    gui_add_view_port(gui, vp, GuiLayerFullscreen);
+
+    while(true) {
+        view_port_update(vp);
+        furi_delay_ms(300);
+    }
+
+    gui_remove_view_port(gui, vp);
+    view_port_free(vp);
+
+    return 0;
+}
